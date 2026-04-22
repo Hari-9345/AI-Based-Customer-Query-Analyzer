@@ -3,7 +3,7 @@ import pickle
 import time
 import requests
 import os
-st.set_page_config(page_title="AI Customer Support", layout="centered")
+st.set_page_config(page_title="AI-Based Customer Query Analyzer", layout="centered")
 API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-base"
 headers = {
     "Authorization": f"Bearer {os.getenv('HF_TOKEN')}"
