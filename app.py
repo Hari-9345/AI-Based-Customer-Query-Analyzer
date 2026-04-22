@@ -1,131 +1,200 @@
 import streamlit as st
 import pickle
-import time
+import requests
 import os
+import time
 
-st.set_page_config(page_title="AI-Based Customer Query Analyzer", layout="centered")
+st.set_page_config(page_title="AI Customer Support", layout="centered")
 
-model = pickle.load(open("model.pkl", "rb"))
-vectorizer = pickle.load(open("vectorizer.pkl", "rb"))
+@st.cache_resource
+def load_resources():
+    with open("model.pkl", "rb") as f:
+        model = pickle.load(f)
+    with open("vectorizer.pkl", "rb") as f:
+        vectorizer = pickle.load(f)
+    return model, vectorizer
 
-def is_greeting(text):
-    greetings = ["hi", "hello", "hey", "vanakam", "vanakkam"]
-    return text.lower().strip() in greetings
+model, vectorizer = load_resources()
 
-def is_valid_query(text):
-    keywords = ["order", "product", "delivery", "refund", "account", "payment"]
-    return any(word in text.lower() for word in keywords)
+API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+headers = {"Authorization": f"Bearer {os.getenv('HF_TOKEN')}"}
 
-def predict_category(text):
-    text_lower = text.lower()
+def call_llm(prompt, retries=2):
+    for _ in range(retries):
+        try:
+            payload = {
+                "inputs": f"<s>[INST] {prompt} [/INST]",
+                "parameters": {
+                    "max_new_tokens": 80,
+                    "temperature": 0.3
+                }
+            }
 
-    if any(w in text_lower for w in ["broken", "damaged", "late", "issue", "problem"]):
-        return "Complaint"
-    if any(w in text_lower for w in ["help", "support", "change", "update", "track"]):
-        return "Request"
+            response = requests.post(
+                API_URL,
+                headers=headers,
+                json=payload,
+                timeout=15
+            )
 
-    vec = vectorizer.transform([text_lower])
+            data = response.json()
+
+            if isinstance(data, dict) and "error" in data:
+                time.sleep(1.5)
+                continue
+
+            return data[0]["generated_text"]
+
+        except:
+            time.sleep(1)
+    return None
+
+@st.cache_data(show_spinner=False)
+def cached_llm(prompt):
+    return call_llm(prompt)
+
+def classify_category(text):
+    vec = vectorizer.transform([text.lower()])
     return model.predict(vec)[0]
 
-def detect_sentiment(text):
-    text = text.lower()
+def adjust_category(text, predicted):
+    text_lower = text.lower()
 
-    if any(w in text for w in ["broken", "bad", "delay", "problem", "issue", "late"]):
-        return "😡 Negative"
-    elif any(w in text for w in ["good", "great", "love", "excellent"]):
-        return "😊 Positive"
-    else:
-        return "🙂 Neutral"
+    negative_words = [
+        "broken", "damaged", "not working", "defective",
+        "problem", "issue", "delay", "late",
+        "not delivered", "not received"
+    ]
 
-def generate_response(query, category, sentiment):
-    q = query.lower()
+    positive_words = [
+        "good", "great", "excellent", "amazing", "love"
+    ]
 
-    if "where is my order" in q:
-        return "Your order seems delayed. Please check your tracking details or contact support."
+    if any(n in text_lower for n in negative_words):
+        return "Complaint"
 
-    if "broken" in q or "damaged" in q:
-        return "We’re really sorry your product arrived damaged 😔 We will replace or refund it."
+    if any(p in text_lower for p in positive_words):
+        return "Feedback"
 
-    if any(w in q for w in ["late", "delay", "not delivered", "delivery issue"]):
-        return "We apologize for the delay. Please check your tracking details or contact support."
+    return predicted
 
-    if category == "Request":
-        return "Your request has been received. Our team will assist you shortly."
+def detect_sentiment_fallback(text):
+    text_lower = text.lower()
 
-    if category == "Feedback":
-        return "Thank you for your feedback! We appreciate it 😊"
+    negative_words = [
+        "problem","issue","delay","late","not delivered",
+        "not received","bad","terrible","frustrated",
+        "unhappy","broken","damaged","defective",
+        "not satisfied","not very satisfied","could have been better"
+    ]
 
-    return "We’re here to help! Please provide more details."
+    positive_words = [
+        "good","great","love","excellent","amazing",
+        "thank you","thanks","appreciate"
+    ]
 
-if "loaded" not in st.session_state:
-    st.session_state.loaded = False
+    if any(n in text_lower for n in negative_words):
+        return "Negative", "😡"
 
-if not st.session_state.loaded:
-    st.markdown("""
-    <div style="text-align:center; margin-top:200px;">
-        <h1 style="color:#3b82f6;">AI Support Assistant</h1>
-        <p style="color:#555;">Starting your assistant...</p>
-    </div>
-    """, unsafe_allow_html=True)
+    if any(p in text_lower for p in positive_words):
+        return "Positive", "😊"
 
-    time.sleep(1.5)
-    st.session_state.loaded = True
-    st.rerun()
+    return "Neutral", "🙂"
 
-st.markdown("""
-<style>
-[data-testid="stAppViewContainer"] {
-    background: linear-gradient(-45deg, #fdfbfb, #ebedee, #e0f7fa, #fce7f3);
-    background-size: 400% 400%;
-    animation: gradientBG 12s ease infinite;
-}
-.main, .block-container {background: transparent !important;}
-.title {text-align:center;font-size:42px;font-weight:bold;color:#2563eb;}
-.chat-box {max-width:700px;margin:auto;}
-.msg-user {background:#3b82f6;color:white;padding:12px;border-radius:20px;margin:10px;text-align:right;}
-.msg-bot {background:#f3f4f6;color:#111;padding:12px;border-radius:20px;margin:10px;}
-</style>
-""", unsafe_allow_html=True)
+def llm_analyze_and_respond(text, category):
+    prompt = f"""
+You are a customer support AI.
+
+Analyze the query and respond.
+
+Rules:
+- If complaint or issue → sentiment = Negative
+- If mixed → Negative
+- If clearly happy → Positive
+
+Return strictly in this format:
+Sentiment: <Positive/Negative/Neutral>
+Response: <short 1-2 sentence reply>
+
+User Query: {text}
+Category: {category}
+"""
+
+    result = cached_llm(prompt)
+
+    if not result:
+        sentiment, icon = detect_sentiment_fallback(text)
+
+        if sentiment == "Positive":
+            reply = "You're welcome! We're glad we could help 😊"
+        elif sentiment == "Negative":
+            reply = f"I'm sorry for the issue regarding {category}. Let me help resolve it."
+        else:
+            reply = f"I understand your query about {category}. Let me assist you."
+
+        return sentiment, icon, reply
+
+    result_lower = result.lower()
+
+    if "sentiment:" in result_lower and "response:" in result_lower:
+        try:
+            sentiment_part = result_lower.split("sentiment:")[1].split("response:")[0].strip()
+            response_part = result.split("Response:")[1].strip()
+
+            if "negative" in sentiment_part:
+                return "Negative", "😡", response_part
+            elif "positive" in sentiment_part:
+                return "Positive", "😊", response_part
+            else:
+                return "Neutral", "🙂", response_part
+        except:
+            pass
+
+    sentiment, icon = detect_sentiment_fallback(text)
+    return sentiment, icon, result
+
+def is_valid_query(text):
+    keywords = [
+        "order", "product", "delivery", "refund",
+        "account", "payment", "service", "experience"
+    ]
+    return any(word in text.lower() for word in keywords)
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-st.markdown('<div class="title">AI-Based Customer Query Analyzer</div>', unsafe_allow_html=True)
-st.markdown('<div class="chat-box">', unsafe_allow_html=True)
+st.markdown("""
+<style>
+[data-testid="stAppViewContainer"] { background: linear-gradient(to right, #fdfbfb, #ebedee); }
+.title { font-size:40px; font-weight:800; color:#1e293b; text-align:center; margin-bottom:20px; }
+.msg-user { background:#3b82f6; color:white; padding:12px; border-radius:15px; margin:10px 0; text-align:right; width:fit-content; margin-left:auto; }
+.msg-bot { background:white; color:#1e293b; padding:12px; border-radius:15px; margin:10px 0; border:1px solid #e2e8f0; width:fit-content; }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown('<div class="title">AI Customer Query Analyzer</div>', unsafe_allow_html=True)
 
 for msg in st.session_state.messages:
-    if msg["role"] == "user":
-        st.markdown(f'<div class="msg-user">🧑 {msg["content"]}</div>', unsafe_allow_html=True)
-    else:
-        st.markdown(f'<div class="msg-bot">🤖 {msg["content"]}</div>', unsafe_allow_html=True)
-
-st.markdown('</div>', unsafe_allow_html=True)
+    role_class = "msg-user" if msg["role"] == "user" else "msg-bot"
+    emoji = "🧑" if msg["role"] == "user" else "🤖"
+    st.markdown(f'<div class="{role_class}">{emoji} {msg["content"]}</div>', unsafe_allow_html=True)
 
 user_input = st.chat_input("Ask your query...")
 
 if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
-
-    time.sleep(1)
-
-    if is_greeting(user_input):
-        category = "General"
-        sentiment = "🙂 Neutral"
-        reply = "Hello! How can I assist you today? 😊"
-
-    elif not is_valid_query(user_input):
+    if not is_valid_query(user_input):
+        reply = "I can help with orders, delivery, and product issues. Please ask a related query 😊"
         category = "Unknown"
-        sentiment = "🙂 Neutral"
-        reply = "I can help with orders, delivery, and product issues. Please ask related queries 😊"
-
+        sentiment_label, icon = "Neutral", "🙂"
     else:
-        category = predict_category(user_input)
-        sentiment = detect_sentiment(user_input)
-        reply = generate_response(user_input, category, sentiment)
+        category = classify_category(user_input)
+        category = adjust_category(user_input, category)
 
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": f"{reply}\n\n📌 {category} |  {sentiment}"
-    })
+        sentiment_label, icon, reply = llm_analyze_and_respond(user_input, category)
+
+    full_response = f"{reply}\n\n📌 {category} | {icon} {sentiment_label}"
+
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
 
     st.rerun()
